@@ -18,7 +18,7 @@ for (let i = 1; i <= pdf.numPages; i++) {
 }
 
 //2. Text → chunks
-function chunkText(text, chunkSize = 300, overlap = 30) {
+function chunkText(text, chunkSize = 50 , overlap = 5) {
   const words = text.split(/\s+/)
   const chunks = []
   const step = chunkSize - overlap
