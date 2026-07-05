@@ -4,6 +4,10 @@ import { search } from './src/db.js'
 import { embedQuery , queryLLM } from './src/chat.js'
 
 const app = express()
+
+import cors from 'cors'
+app.use(cors())
+
 app.use(express.json({ limit: "10kb" }))
 
 app.post('/query', async (req, res) => {

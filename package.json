@@ -20,6 +20,7 @@
   "homepage": "https://github.com/SamvidChawla/rag_chat#readme",
   "dependencies": {
     "@google/genai": "^2.10.0",
+    "cors": "^2.8.6",
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
     "pdfjs-dist": "^6.1.200",
