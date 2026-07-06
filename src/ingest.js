@@ -9,43 +9,75 @@ const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY })
 const loadingTask = pdfjsLib.getDocument({url: './data.pdf'})
 const pdf = await loadingTask.promise
 
-let fullText = ''
-for (let i = 1; i <= pdf.numPages; i++) {
-  const page = await pdf.getPage(i)
+const chunks = []
+
+for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber++) {
+  const page = await pdf.getPage(pageNumber)
   const content = await page.getTextContent()
+
   const pageText = content.items.map(item => item.str).join(' ')
-  fullText += pageText + ' '
+
+  chunks.push(...chunkText(pageText, pageNumber))
 }
 
 //2. Text → chunks
-function chunkText(text, chunkSize = 50 , overlap = 5) {
+function chunkText(text, pageNumber, chunkSize = 200, overlap = 20) {
   const words = text.split(/\s+/)
   const chunks = []
   const step = chunkSize - overlap
 
   for (let i = 0; i < words.length; i += step) {
-    const chunk = words.slice(i, i + chunkSize).join(' ')
-    chunks.push(chunk)
+    chunks.push({
+      pageNumber,
+      content: words.slice(i, i + chunkSize).join(' ')
+    })
   }
 
   return chunks
 }
 
-const chunks = chunkText(fullText)
-
 //3. Embed each chunk → store in DB
 async function embedText(text) {
-  const result = await ai.models.embedContent({
-    model: 'gemini-embedding-2',
-    contents: 'task:search result\n\n' + text
-  })
-  return result.embeddings[0].values
+  let attempts = 0
+  const maxAttempts = 5
+  let delay = 2000
+
+  while (attempts < maxAttempts) {
+    try {
+      const result = await ai.models.embedContent({
+        model: 'gemini-embedding-2',
+        contents: 'task:search result\n\n' + text
+      });
+      return result.embeddings[0].values
+    } catch (err) {
+      if (err.status === 429) {
+        attempts++
+        console.log(`Rate limited. Waiting ${delay / 1000} seconds... (Attempt ${attempts}/${maxAttempts})`)
+        await new Promise(r => setTimeout(r, delay))
+        delay *= 2
+      } else {
+        console.error(err) 
+      }
+    }
+  }
+  console.error("Failed to get embedding after maximum retries.");
 }
 
-for (const chunk of chunks) {
-  const vector = await embedText(chunk)
-  await ingest(chunk, vector)
-  console.log('stored chunk:', chunk.slice(0, 60), '...')
+
+for (let i = 0; i < chunks.length; i++) {
+  const chunk = chunks[i]
+
+  const vector = await embedText(chunk.content)
+
+  await ingest(
+    'Data.pdf',
+    chunk.pageNumber,
+    i,
+    chunk.content,
+    vector
+  )
+
+  console.log('stored chunk:', chunk.content.slice(0, 60), '...')
 }
 
 console.log('done. total chunks:', chunks.length)

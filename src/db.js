@@ -8,13 +8,21 @@ const client = new Client({
 await client.connect()
 
 // Store a chunk
-export async function ingest(chunkText, embeddingArray) {
-    try{
+export async function ingest(documentName, pageNumber, chunkIndex, chunkText, embeddingArray) {
+    try {
         await client.query(
-            'INSERT INTO chunks (content, embedding) VALUES ($1, $2)',
-            [chunkText, JSON.stringify(embeddingArray)]
+            `INSERT INTO chunks
+            (document_name, page_number, chunk_index, content, embedding)
+            VALUES ($1, $2, $3, $4, $5)`,
+            [
+                documentName,
+                pageNumber,
+                chunkIndex,
+                chunkText,
+                JSON.stringify(embeddingArray)
+            ]
         )
-    }catch(err){
+    } catch (err) {
         console.error(err)
     }
 }
