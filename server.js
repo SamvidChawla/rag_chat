@@ -18,7 +18,7 @@ app.post('/query', async (req, res) => {
   const context = await search(embedding)
   const answer = await queryLLM(query, context)
 
-  res.json({ answer })
+  res.json(answer)
 })
 
 const startServer = async () => {

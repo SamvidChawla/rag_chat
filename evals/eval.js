@@ -11,7 +11,7 @@ async function getRagAnswer(question) {
     body: JSON.stringify({ query: question }),
   });
   const data = await res.json();
-  return data.answer;
+  return data;
 }
 
 async function judge(question, expected, predicted) {
@@ -20,7 +20,9 @@ async function judge(question, expected, predicted) {
 Rules:
 - Out-of-scope questions (expected contains "does not mention" / "does not specify"): predicted MUST say the info is unavailable. Any fabricated detail = FAIL.
 - Factual questions: must be correct AND complete. Answering "Yes" without a required condition (e.g. supervisor awareness) = FAIL.
-- Exact wording not required. Semantically equivalent = PASS.
+- Exact wording not required at all. Semantically equivalent = PASS.
+- Additional correct information should not cause a FAIL. Only fail if required information is missing or incorrect.
+- If the predicted answer says the information is unavailable, missing, or not mentioned, but the expected answer contains the information, FAIL.
 
 Question: ${question}
 Expected: ${expected}
@@ -42,18 +44,22 @@ async function runEval() {
 
   for (const item of dataset) {
     const predicted = await getRagAnswer(item.question);
-    const pass = await judge(item.question, item.expected, predicted);
+    const pass = await judge(item.question, item.expected, predicted.response);
 
     if (pass) {
       passed++;
       console.log(`[PASS] Q${item.id}`);
+      console.log(`  Expected:  ${item.expected}`);
+      console.log(`  Predicted: ${predicted.response}`);
+      console.log(`  Chunk_ID: ${predicted.chunk_index}`);
     } else {
       failures.push(item.id);
       console.log(`[FAIL] Q${item.id}`);
       console.log(`  Expected:  ${item.expected}`);
-      console.log(`  Predicted: ${predicted}`);
+      console.log(`  Predicted: ${predicted.response}`);
+      console.log(`  Chunk_ID: ${predicted.chunk_index}`);
     }
-    await new Promise(r => setTimeout(r, 9000));
+    await new Promise(r => setTimeout(r, 8600));
   }
 
   console.log(`\nFinal Score: ${passed}/${dataset.length}`);

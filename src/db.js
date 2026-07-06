@@ -31,7 +31,7 @@ export async function ingest(documentName, pageNumber, chunkIndex, chunkText, em
 export async function search(queryEmbedding){
     try{
         const res = await client.query(
-            'SELECT content FROM chunks ORDER BY embedding <=> $1 LIMIT 3',
+            'SELECT content , chunk_index FROM chunks ORDER BY embedding <=> $1 LIMIT 10',
             [JSON.stringify(queryEmbedding)]
         )
         return res.rows
