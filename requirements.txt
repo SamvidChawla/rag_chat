@@ -12,3 +12,4 @@ pypdf
 python-docx
 tiktoken
 httpx
+google-genai
