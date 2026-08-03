@@ -11,6 +11,8 @@ class Settings(BaseSettings):
     gemini_api_key: str
     gemini_llm_model: str = "gemini-3.5-flash"
     gemini_embedding_model: str = "gemini-embedding-2"
+    gemini_llm_temperature: float = 0.2 
+    gemini_llm_max_tokens: int = 1024
     embedding_dim: int = 3072
 
     # Retrieval
