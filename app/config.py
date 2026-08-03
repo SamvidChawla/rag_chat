@@ -20,6 +20,8 @@ class Settings(BaseSettings):
     chunk_overlap: int = 150
     top_k: int = 10
     rerank_top_k: int = 5
+    enable_reranking: bool = False
+    reranker_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 
     # App
     app_env: str = "dev"
