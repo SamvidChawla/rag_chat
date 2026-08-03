@@ -25,6 +25,7 @@ class Settings(BaseSettings):
 
     # App
     app_env: str = "dev"
+    max_upload_size_mb: int = 20
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 
