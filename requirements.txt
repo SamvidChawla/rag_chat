@@ -5,7 +5,7 @@ pgvector
 python-dotenv
 pydantic
 pydantic-settings
-langchain-community
+langchain-community<0.4.2
 langchain-text-splitters
 pypdf
 python-docx
@@ -13,3 +13,4 @@ tiktoken
 httpx
 google-genai
 python-multipart
+ragas==0.4.3

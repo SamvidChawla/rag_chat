@@ -1,6 +1,12 @@
 import logging
 import time
-from typing import Any
+
+from ragas import evaluate, EvaluationDataset
+from ragas.run_config import RunConfig
+from ragas.llms import BaseRagasLLM
+from ragas.embeddings.base import BaseRagasEmbedding
+from ragas.metrics import faithfulness, answer_relevancy, context_precision, context_recall
+from langchain_core.outputs import LLMResult, Generation
 
 from google import genai
 from google.genai import types
@@ -13,147 +19,130 @@ from app.generation.llm_client import generate_answer
 
 logger = logging.getLogger(__name__)
 
-_judge_client = genai.Client(api_key=settings.gemini_api_key)
+_genai_client = genai.Client(api_key=settings.gemini_api_key)
+
+# Gemini free/standard tiers here cap at 15 RPM. Every question makes 2 Gemini calls
+# (generate_answer inside the pipeline, then the RAGAS judge call per metric on top),
+# so this sleep is between-question pacing on top of that, not a substitute for it.
+SECONDS_BETWEEN_QUESTIONS = 8
+
+
+# --- Wrap the same Gemini client/model your app already uses as the RAGAS judge ---
+class GeminiRagasLLM(BaseRagasLLM):
+    def generate_text(self, prompt, n=1, temperature=1e-8, stop=None, callbacks=None) -> LLMResult:
+        prompt_str = prompt.to_string() if hasattr(prompt, "to_string") else str(prompt)
+        generations = []
+        for _ in range(n):
+            time.sleep(4)  # 15 RPM cap — pace every individual judge call, not just per-question
+            response = _genai_client.models.generate_content(
+                model=settings.gemini_llm_model,
+                contents=prompt_str,
+                config=types.GenerateContentConfig(temperature=temperature or 0.0),
+            )
+            generations.append(Generation(text=response.text))
+        return LLMResult(generations=[generations])
+
+    async def agenerate_text(self, prompt, n=1, temperature=1e-8, stop=None, callbacks=None) -> LLMResult:
+        return self.generate_text(prompt, n, temperature, stop, callbacks)
+
+    def is_finished(self, response: LLMResult) -> bool:
+        # Gemini responses here aren't token-capped mid-generation for our short judge
+        # prompts, so treat every response as complete.
+        return True
+
+
+# --- Wrap your existing embed_query so context_precision/recall score against the same
+#     embeddings your retrieval actually uses ---
+class AppEmbeddings(BaseRagasEmbedding):
+    def embed_text(self, text: str, **kwargs):
+        return embed_query(text)
+
+    async def aembed_text(self, text: str, **kwargs):
+        return self.embed_text(text)
+
 
 EVAL_QUESTIONS = [
-    {
-        "question": "Who is the CEO of Nightingale Robotics?",
-        "expected": "Priya Shah",
-    },
-    {
-        "question": "What is the unit price of the SkyCount X3?",
-        "expected": "$18,500",
-    },
-    {
-        "question": "What was Nightingale's revenue in fiscal year 2024?",
-        "expected": "$47.2 million",
-    },
-    {
-        "question": "What percentage did revenue grow from 2023 to 2024?",
-        "expected": "34 percent",
-    },
-    {
-        "question": "What is the total headcount across all three Nightingale offices?",
-        "expected": "340 (180 Austin + 95 Berlin + 65 Singapore)",
-    },
-    {
-        "question": "How many SkyCount X3 drones did Bluepeak Logistics deploy, and what reduction in inventory discrepancies did they see?",
-        "expected": "45 drones, 22 percent reduction",
-    },
-    {
-        "question": "What is the minimum ceiling height required for SkyCount drones to operate?",
-        "expected": "4 meters",
-    },
-    {
-        "question": "How much was the Series C funding round and who led it?",
-        "expected": "$60 million, led by Horizon Ventures",
-    },
-    {
-        "question": "What university is Nightingale partnering with for swarm-coordination research, and what is the grant amount?",
-        "expected": "University of Texas at Austin, $2.4 million",
-    },
-    {
-        "question": "What is Nightingale's stock ticker symbol?",
-        "expected": "NOT_IN_DOCUMENT",
-    },
+    {"question": "What are Northstar's standard customer support hours?", "ground_truth": "Monday through Friday, 8:00 a.m. to 6:00 p.m. Central Time"},
+    {"question": "How much PTO does a U.S. employee on the standard plan get in their first three years?", "ground_truth": "20 days per calendar year"},
+    {"question": "What is the standard lodging limit for domestic U.S. business travel?", "ground_truth": "$250 per night before taxes and mandatory fees"},
+    {"question": "Is alcohol reimbursable during business travel?", "ground_truth": "No, alcohol is not reimbursable"},
+    {"question": "What approval is required for a purchase between $5,001 and $25,000?", "ground_truth": "Manager and Finance approval"},
+    {"question": "How long are standard production backups retained?", "ground_truth": "35 days, unless a contractual requirement specifies otherwise"},
+    {"question": "Within what time frame should a Severity 2 incident be acknowledged?", "ground_truth": "Within 30 minutes during covered hours"},
+    {"question": "What percentage does Northstar match on employee 401(k) contributions?", "ground_truth": "50% of employee contributions on the first 6% of eligible compensation"},
+    {"question": "Up to what amount can a support representative approve a service credit without escalation?", "ground_truth": "$250"},
+    {"question": "How often do employees generally receive a formal performance review?", "ground_truth": "Twice each year"},
 ]
 
-JUDGE_PROMPT_TEMPLATE = """You are evaluating a RAG system's answer for factual correctness.
-
-Question: {question}
-Expected answer (ground truth): {expected}
-System's actual answer: {actual}
-
-Special case: if the expected answer is "NOT_IN_DOCUMENT", the system PASSES only if it
-explicitly states it cannot find the answer in the provided documents, and FAILS if it
-guesses or fabricates an answer.
-
-Otherwise, judge PASS if the system's answer contains the correct fact(s), even if worded
-differently. Judge FAIL if the fact is wrong, missing, or fabricated.
-
-Respond in exactly this format:
-VERDICT: PASS or FAIL
-REASON: <one sentence>
-"""
+ABSTENTION_CASE = {
+    "question": "What is Northstar Analytics' stock ticker symbol?",
+    "expected_behavior": "must explicitly say it cannot find this in the documents",
+}
 
 
-def _judge(question: str, expected: str, actual: str) -> dict[str, Any]:
-    prompt = JUDGE_PROMPT_TEMPLATE.format(question=question, expected=expected, actual=actual)
-
-    response = _judge_client.models.generate_content(
-        model=settings.gemini_llm_model,
-        contents=prompt,
-        config=types.GenerateContentConfig(temperature=0.0),
-    )
-
-    text = response.text.strip()
-    verdict = "PASS" if "VERDICT: PASS" in text else "FAIL"
-    reason = text.split("REASON:")[-1].strip() if "REASON:" in text else text
-
-    return {"verdict": verdict, "reason": reason}
+def _run_pipeline(question: str) -> tuple[str, list[str]]:
+    query_embedding = embed_query(question)
+    chunks = search(query_embedding)
+    chunks = rerank(question, chunks)
+    answer = generate_answer(question, chunks)
+    contexts = [c["content"] for c in chunks]
+    return answer, contexts
 
 
-def _check_retrieval(expected: str, chunks: list[dict]) -> bool:
-    if expected == "NOT_IN_DOCUMENT":
-        return True  # nothing should be retrievable for this
-    combined = " ".join(c["content"] for c in chunks).lower()
-    # crude but useful signal: does any key token from expected show up in retrieved text
-    key_tokens = [t.strip("$,%()") for t in expected.split() if len(t) > 2]
-    return any(tok.lower() in combined for tok in key_tokens)
+def _check_abstention(answer: str) -> bool:
+    refusal_signals = ["cannot find", "not available", "no information", "not mentioned", "don't have", "not provided", "unable to find"]
+    return any(sig in answer.lower() for sig in refusal_signals)
+
+
+def build_dataset() -> EvaluationDataset:
+    rows = []
+    for item in EVAL_QUESTIONS:
+        logger.info("Running pipeline: %s", item["question"])
+        answer, contexts = _run_pipeline(item["question"])
+        rows.append({
+            "user_input": item["question"],
+            "response": answer,
+            "retrieved_contexts": contexts,
+            "reference": item["ground_truth"],
+        })
+        time.sleep(SECONDS_BETWEEN_QUESTIONS)
+    return EvaluationDataset.from_list(rows)
 
 
 def run_eval() -> None:
-    results = []
-    passed = 0
+    dataset = build_dataset()
 
-    for item in EVAL_QUESTIONS:
-        question, expected = item["question"], item["expected"]
-        logger.info("Evaluating: %s", question)
+    # 15 RPM = 1 call per 4s. max_workers=1 forces judge calls fully sequential;
+    # max_retries/max_wait give it room to back off instead of hammering on a 429.
+    run_config = RunConfig(
+        max_workers=1,
+        max_retries=5,
+        max_wait=60,
+    )
 
-        try:
-            query_embedding = embed_query(question)
-            chunks = search(query_embedding)
-            chunks = rerank(question, chunks)
-            answer = generate_answer(question, chunks)
-
-            retrieval_ok = _check_retrieval(expected, chunks)
-            judged = _judge(question, expected, answer)
-
-            if judged["verdict"] == "PASS":
-                passed += 1
-
-            results.append({
-                "question": question,
-                "expected": expected,
-                "actual": answer,
-                "verdict": judged["verdict"],
-                "reason": judged["reason"],
-                "retrieval_found_fact": retrieval_ok,
-            })
-
-        except Exception:
-            logger.error("Eval question failed to run: %s", question, exc_info=True)
-            results.append({
-                "question": question,
-                "expected": expected,
-                "actual": None,
-                "verdict": "ERROR",
-                "reason": "Exception during pipeline execution",
-                "retrieval_found_fact": False,
-            })
-
-        time.sleep(1)  # light pacing to avoid rate limits across judge + generation calls
+    result = evaluate(
+        dataset=dataset,
+        metrics=[faithfulness, answer_relevancy, context_precision, context_recall],
+        llm=GeminiRagasLLM(),
+        embeddings=AppEmbeddings(),
+        run_config=run_config,
+    )
 
     print("\n" + "=" * 60)
-    print(f"EVAL RESULTS: {passed}/{len(EVAL_QUESTIONS)} passed")
+    print("RAGAS RESULTS")
     print("=" * 60)
-    for r in results:
-        status = "✓" if r["verdict"] == "PASS" else "✗"
-        retrieval_flag = "" if r["retrieval_found_fact"] else "  [retrieval miss]"
-        print(f"{status} [{r['verdict']}] {r['question']}{retrieval_flag}")
-        print(f"    expected: {r['expected']}")
-        print(f"    got: {r['actual']}")
-        print(f"    reason: {r['reason']}\n")
+    print(result)
+    df = result.to_pandas()
+    print(df.to_string())
+    df.to_csv("ragas_eval_results.csv", index=False)
+
+    print("\n" + "-" * 60)
+    print("ABSTENTION CHECK (not scored by RAGAS)")
+    answer, _ = _run_pipeline(ABSTENTION_CASE["question"])
+    abstained = _check_abstention(answer)
+    status = "PASS" if abstained else "FAIL"
+    print(f"[{status}] {ABSTENTION_CASE['question']}")
+    print(f"  answer: {answer}")
 
 
 if __name__ == "__main__":

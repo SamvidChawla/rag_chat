@@ -9,9 +9,9 @@ class Settings(BaseSettings):
 
     # Gemini API
     gemini_api_key: str
-    gemini_llm_model: str = "gemini-3.5-flash"
+    gemini_llm_model: str = "gemini-3.5-flash-lite"
     gemini_embedding_model: str = "gemini-embedding-2"
-    gemini_llm_temperature: float = 0.2 
+    gemini_llm_temperature: float = 1 
     gemini_llm_max_tokens: int = 1024
     embedding_dim: int = 3072
 
